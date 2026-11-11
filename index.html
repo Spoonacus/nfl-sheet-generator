@@ -3,8 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Uncle's NFL Pick'em Sheet Generator</title>
-  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+  <title>Uncle's Exact NFL Pick'em Generator</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 20px; background: #f4f6f8; color: #1a1a1a; }
@@ -21,12 +20,12 @@
 </head>
 <body>
   <div class="card">
-    <h2>NFL Pick'em Excel Generator</h2>
+    <h2>NFL Pick'em Exact XML Generator</h2>
     
     <label for="seasonYear">NFL Season Year</label>
     <input type="number" id="seasonYear" value="2026" />
 
-    <label for="playerRows">Blank Player Rows to Include (Uncle's sheet uses 6)</label>
+    <label for="playerRows">Blank Player Rows (Uncle's Week 9 has 6)</label>
     <input type="number" id="playerRows" value="6" />
 
     <label for="singleWeek">Single Week Download</label>
@@ -34,30 +33,34 @@
       <option value="1">Week 1</option><option value="2">Week 2</option><option value="3">Week 3</option>
       <option value="4">Week 4</option><option value="5">Week 5</option><option value="6">Week 6</option>
       <option value="7">Week 7</option><option value="8">Week 8</option><option value="9">Week 9</option>
-      <option value="10">Week 10</option><option value="11" selected>Week 11</option><option value="12">Week 12</option>
+      <option value="10" selected>Week 10</option><option value="11">Week 11</option><option value="12">Week 12</option>
       <option value="13">Week 13</option><option value="14">Week 14</option><option value="15">Week 15</option>
       <option value="16">Week 16</option><option value="17">Week 17</option><option value="18">Week 18</option>
     </select>
 
     <button onclick="generateSingleWeek()">Download Selected Week (.xlsx)</button>
     <button class="secondary" onclick="generateFullSeasonZip()">Download All 18 Weeks (.zip of 18 .xlsx files)</button>
-    <button onclick="generateFullSeasonWorkbook()" style="background:#2e7d32;">Download All 18 Weeks (Single 18-Tab .xlsx)</button>
 
-    <div id="status">Ready.</div>
+    <div id="status">Ready. Uses Uncle's exact raw XML column widths (2.828125 & 0.26953125).</div>
   </div>
 
   <script>
-    const thinBorder = {
-      top: { style: "thin", color: { rgb: "000000" } },
-      bottom: { style: "thin", color: { rgb: "000000" } },
-      left: { style: "thin", color: { rgb: "000000" } },
-      right: { style: "thin", color: { rgb: "000000" } }
-    };
+    // Convert 1-based column index to Excel column letter (1 -> A, 27 -> AA, 46 -> AT)
+    function colLetter(colIdx) {
+      let temp, letter = '';
+      while (colIdx > 0) {
+        temp = (colIdx - 1) % 26;
+        letter = String.fromCharCode(temp + 65) + letter;
+        colIdx = (colIdx - temp - 1) / 26;
+      }
+      return letter;
+    }
 
-    const whiteFill = {
-      patternType: "solid",
-      fgColor: { rgb: "FFFFFF" }
-    };
+    function escapeXml(unsafe) {
+      return String(unsafe).replace(/[<>&'"]/g, c => ({
+        '<': '&lt;', '>': '&gt;', '&': '&amp;', '\'': '&apos;', '"': '&quot;'
+      }[c]));
+    }
 
     async function fetchWeekMatchups(year, week) {
       const url = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${year}&seasontype=2&week=${week}`;
@@ -65,104 +68,123 @@
       const data = await res.json();
       const events = data.events || [];
 
-      // Sort chronologically by kickoff date/time so MNF is guaranteed to be last
+      // Sort chronologically by kickoff time so Monday Night Football is always last
       events.sort((a, b) => new Date(a.date) - new Date(b.date));
 
       return events.map(ev => {
         const comp = ev.competitions[0];
         const away = comp.competitors.find(c => c.homeAway === "away").team.shortDisplayName;
         const home = comp.competitors.find(c => c.homeAway === "home").team.shortDisplayName;
-        return { away, home, date: ev.date };
+        return { away, home };
       });
     }
 
-    function buildWorksheet(week, matchups, playerRowCount) {
+    // Builds an exact byte-for-byte structural clone of Uncle's NFL Week 9.xlsx
+    async function buildExactXlsxBlob(week, matchups, playerRows) {
+      const zip = new JSZip();
       const numGames = matchups.length;
-      const tieBreakerCol = 3 * numGames; // Col A = 0, games take 3*N - 1 cols, TieBreaker = 3*N
-      const totalRows = 2 + playerRowCount;
-      const extraBlankRows = totalRows + 25; // Paint white background below table to hide Excel gridlines
-      const ws = {};
+      const tieCol = 3 * numGames + 1; // 1-based: Col A=1, 15 games -> AT=46, 16 games -> AW=49
+      const maxCol = tieCol + 2;       // Matches AU & AV trailing columns in Uncle's file
+      const totalRows = 2 + playerRows;
 
-      // Hide default sheet gridlines where supported and fill background white
-      ws["!views"] = [{ showGridLines: false }];
-
-      for (let r = 0; r < extraBlankRows; r++) {
-        for (let c = 0; c <= tieBreakerCol + 2; c++) {
-          const cellRef = XLSX.utils.encode_cell({ r, c });
-          ws[cellRef] = { v: "", t: "s", s: { fill: whiteFill } };
-
-          if (r < totalRows && c <= tieBreakerCol) {
-            if (r === 0) {
-              // Row 1: Vertical stacked team headers
-              ws[cellRef].s = {
-                font: { name: "Arial", sz: 8 },
-                alignment: { textRotation: 255, horizontal: "center", vertical: "bottom" },
-                fill: whiteFill,
-                border: thinBorder
-              };
-            } else if (r === 1) {
-              // Row 2: Merged "NFL Week X" banner (Bold + Underline, top/bottom borders)
-              ws[cellRef].s = {
-                font: { name: "Arial", sz: 10, bold: true, underline: true },
-                alignment: { horizontal: "center", vertical: "center" },
-                fill: whiteFill,
-                border: {
-                  top: { style: "thin", color: { rgb: "000000" } },
-                  bottom: { style: "thin", color: { rgb: "000000" } },
-                  left: c === 0 ? { style: "thin", color: { rgb: "000000" } } : undefined,
-                  right: c === tieBreakerCol ? { style: "thin", color: { rgb: "000000" } } : undefined
-                }
-              };
-            } else {
-              // Rows 3+: Player pick rows
-              ws[cellRef].s = {
-                font: { name: "Arial", sz: 10 },
-                alignment: { horizontal: c === 0 ? "left" : "center", vertical: "center" },
-                fill: whiteFill,
-                border: thinBorder
-              };
-            }
-          }
-        }
-      }
-
-      // Populate Row 1: Away, Home, Spacer
-      matchups.forEach((m, idx) => {
-        const awayCol = 1 + idx * 3;
-        const homeCol = 2 + idx * 3;
-        ws[XLSX.utils.encode_cell({ r: 0, c: awayCol })].v = m.away;
-        ws[XLSX.utils.encode_cell({ r: 0, c: homeCol })].v = m.home;
+      // 1. Build sharedStrings.xml
+      const strings = [];
+      matchups.forEach(m => {
+        strings.push(m.away);
+        strings.push(m.home);
       });
+      strings.push("Tie Breaker");
+      strings.push(`NFL Week ${week}`);
 
-      // Populate Tie Breaker header
-      ws[XLSX.utils.encode_cell({ r: 0, c: tieBreakerCol })].v = "Tie Breaker";
+      const sstItems = strings.map(s => `<si><t>${escapeXml(s)}</t></si>`).join("");
+      const sharedStringsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${strings.length}" uniqueCount="${strings.length}">${sstItems}</sst>`;
 
-      // Populate Row 2: Merged "NFL Week X" Banner
-      ws["A2"].v = `NFL Week ${week}`;
-      ws["!merges"] = [{ s: { r: 1, c: 0 }, e: { r: 1, c: tieBreakerCol } }];
-
-      // Exact pixel widths (`wpx`) so spacer columns collapse to double-lines like Uncle's sheet
-      const cols = [{ wpx: 215 }]; // Col A (~29.8 width)
-      for (let i = 0; i < numGames; i++) {
-        cols.push({ wpx: 25 }); // Away col (~2.83 width)
-        cols.push({ wpx: 25 }); // Home col (~2.83 width)
-        if (i < numGames - 1) {
-          cols.push({ wpx: 3 }); // Micro-spacer column (3px double-line divider)
+      // 2. Build exact <cols> from Uncle's sheet1.xml
+      let colsXml = `<cols>`;
+      colsXml += `<col min="1" max="1" width="29.80078125" style="4" bestFit="1" customWidth="1" />`;
+      for (let g = 0; g < numGames; g++) {
+        const awayCol = 2 + g * 3;
+        const homeCol = 3 + g * 3;
+        const sepCol  = 4 + g * 3;
+        colsXml += `<col min="${awayCol}" max="${homeCol}" width="2.828125" style="4" bestFit="1" customWidth="1" />`;
+        if (g < numGames - 1) {
+          colsXml += `<col min="${sepCol}" max="${sepCol}" width="0.26953125" style="4" customWidth="1" />`;
         }
       }
-      cols.push({ wpx: 26 }); // Tie Breaker col
-      cols.push({ wpx: 65 }); // Extra right margin column
-      ws["!cols"] = cols;
+      colsXml += `<col min="${tieCol}" max="${tieCol + 1}" width="2.96484375" style="4" bestFit="1" customWidth="1" />`;
+      colsXml += `<col min="${tieCol + 2}" max="16384" width="9.16796875" style="4" />`;
+      colsXml += `</cols>`;
 
-      // Exact Row heights (Row 1 = 117pt, others = 12.75pt)
-      const rows = [{ hpt: 117.0 }];
-      for (let r = 1; r < extraBlankRows; r++) {
-        rows.push({ hpt: 12.75 });
+      // 3. Build <sheetData> rows
+      let sheetDataXml = `<sheetData>`;
+
+      // Row 1 (Height 117, vertical stacked team names)
+      sheetDataXml += `<row r="1" spans="1:${maxCol}" ht="117" x14ac:dyDescent="0.1">`;
+      sheetDataXml += `<c r="A1" s="1" />`;
+      let strIdx = 0;
+      for (let g = 0; g < numGames; g++) {
+        const awayRef = `${colLetter(2 + g * 3)}1`;
+        const homeRef = `${colLetter(3 + g * 3)}1`;
+        sheetDataXml += `<c r="${awayRef}" s="2" t="s"><v>${strIdx++}</v></c>`;
+        sheetDataXml += `<c r="${homeRef}" s="2" t="s"><v>${strIdx++}</v></c>`;
+        if (g < numGames - 1) {
+          const sepRef = `${colLetter(4 + g * 3)}1`;
+          sheetDataXml += `<c r="${sepRef}" s="2" />`;
+        }
       }
-      ws["!rows"] = rows;
+      sheetDataXml += `<c r="${colLetter(tieCol)}1" s="3" t="s"><v>${strIdx++}</v></c>`;
+      sheetDataXml += `</row>`;
 
-      ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: extraBlankRows - 1, c: tieBreakerCol + 2 } });
-      return ws;
+      // Row 2 (Merged "NFL Week X" banner, height 12.75)
+      sheetDataXml += `<row r="2" spans="1:${maxCol}" s="5" customFormat="1" ht="12.75" x14ac:dyDescent="0.15">`;
+      sheetDataXml += `<c r="A2" s="11" t="s"><v>${strIdx++}</v></c>`;
+      for (let c = 2; c < tieCol; c++) {
+        sheetDataXml += `<c r="${colLetter(c)}2" s="12" />`;
+      }
+      sheetDataXml += `<c r="${colLetter(tieCol)}2" s="13" />`;
+      sheetDataXml += `</row>`;
+
+      // Rows 3 to totalRows (6 blank player rows by default, height 12.75)
+      for (let r = 3; r <= totalRows; r++) {
+        sheetDataXml += `<row r="${r}" spans="1:${maxCol}" s="5" customFormat="1" ht="12.75" x14ac:dyDescent="0.15">`;
+        sheetDataXml += `<c r="A${r}" s="6" />`;
+        for (let c = 2; c <= tieCol; c++) {
+          sheetDataXml += `<c r="${colLetter(c)}${r}" s="7" />`;
+        }
+        sheetDataXml += `<c r="${colLetter(tieCol + 1)}${r}" s="8" />`;
+        sheetDataXml += `<c r="${colLetter(tieCol + 2)}${r}" s="8" />`;
+        sheetDataXml += `</row>`;
+      }
+      sheetDataXml += `</sheetData>`;
+
+      const tieColLetter = colLetter(tieCol);
+      const maxColLetter = colLetter(maxCol);
+
+      const sheet1Xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x14ac xr xr2 xr3" xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac" xmlns:xr="http://schemas.microsoft.com/office/spreadsheetml/2014/revision" xmlns:xr2="http://schemas.microsoft.com/office/spreadsheetml/2015/revision2" xmlns:xr3="http://schemas.microsoft.com/office/spreadsheetml/2016/revision3"><dimension ref="A1:${maxColLetter}${totalRows}" /><sheetViews><sheetView showGridLines="0" tabSelected="1" zoomScaleNormal="100" workbookViewId="0"><selection activeCell="A3" sqref="A3" /></sheetView></sheetViews><sheetFormatPr defaultColWidth="9.16796875" defaultRowHeight="10.5" x14ac:dyDescent="0.1" />${colsXml}${sheetDataXml}<mergeCells count="1"><mergeCell ref="A2:${tieColLetter}2" /></mergeCells><printOptions horizontalCentered="1" /><pageMargins left="0.2" right="0.05" top="0.51" bottom="0.5" header="0.17" footer="0.5" /><pageSetup scale="85" orientation="landscape" /></worksheet>`;
+
+      // Exact styles.xml from Uncle's NFL Week 9.xlsx
+      const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x14ac x16r2 xr" xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac" xmlns:x16r2="http://schemas.microsoft.com/office/spreadsheetml/2015/02/main" xmlns:xr="http://schemas.microsoft.com/office/spreadsheetml/2014/revision"><fonts count="6" x14ac:knownFonts="1"><font><sz val="10" /><name val="Arial" /><family val="2" /></font><font><sz val="10" /><name val="Arial" /><family val="2" /></font><font><sz val="8" /><name val="Arial" /><family val="2" /></font><font><sz val="8" /><color indexed="10" /><name val="Arial" /><family val="2" /></font><font><b /><i /><u /><sz val="10" /><name val="Arial" /><family val="2" /></font><font><sz val="10" /><color rgb="FFFF0000" /><name val="Arial" /><family val="2" /></font></fonts><fills count="3"><fill><patternFill patternType="none" /></fill><fill><patternFill patternType="gray125" /></fill><fill><patternFill patternType="solid"><fgColor theme="0" /><bgColor indexed="64" /></patternFill></fill></fills><borders count="5"><border><left /><right /><top /><bottom /><diagonal /></border><border><left style="thin"><color indexed="64" /></left><right style="thin"><color indexed="64" /></right><top style="thin"><color indexed="64" /></top><bottom style="thin"><color indexed="64" /></bottom><diagonal /></border><border><left style="thin"><color indexed="64" /></left><right /><top style="thin"><color indexed="64" /></top><bottom style="thin"><color indexed="64" /></bottom><diagonal /></border><border><left /><right /><top style="thin"><color indexed="64" /></top><bottom style="thin"><color indexed="64" /></bottom><diagonal /></border><border><left /><right style="thin"><color indexed="64" /></right><top style="thin"><color indexed="64" /></top><bottom style="thin"><color indexed="64" /></bottom><diagonal /></border></borders><cellStyleXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" /><xf numFmtId="0" fontId="1" fillId="0" borderId="0" /></cellStyleXfs><cellXfs count="14"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" /><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" /><xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment textRotation="255" /></xf><xf numFmtId="0" fontId="3" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment textRotation="255" /></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" /><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" /><xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" /></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" /></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" /><xf numFmtId="0" fontId="5" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" /><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" /></xf><xf numFmtId="0" fontId="4" fillId="0" borderId="2" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" /></xf><xf numFmtId="0" fontId="4" fillId="0" borderId="3" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" /></xf><xf numFmtId="0" fontId="4" fillId="0" borderId="4" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" /></xf></cellXfs><cellStyles count="2"><cellStyle name="Normal" xfId="0" builtinId="0" /><cellStyle name="Normal 6" xfId="1" /></cellStyles><dxfs count="0" /><tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16" /></styleSheet>`;
+
+      const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><fileVersion appName="xl" lastEdited="7" lowestEdited="7" rupBuild="30625" /><workbookPr defaultThemeVersion="124226" /><bookViews><workbookView xWindow="-96" yWindow="-96" windowWidth="23232" windowHeight="12432" /></bookViews><sheets><sheet name="Week (${week})" sheetId="1" r:id="rId1" /></sheets><calcPr calcId="191028" /></workbook>`;
+
+      const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" /><Default Extension="xml" ContentType="application/xml" /><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" /><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml" /><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml" /><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml" /></Types>`;
+
+      const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml" /></Relationships>`;
+
+      const workbookRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml" /><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml" /><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml" /></Relationships>`;
+
+      zip.file("[Content_Types].xml", contentTypesXml);
+      zip.file("_rels/.rels", rootRelsXml);
+      zip.file("xl/workbook.xml", workbookXml);
+      zip.file("xl/_rels/workbook.xml.rels", workbookRelsXml);
+      zip.file("xl/worksheets/sheet1.xml", sheet1Xml);
+      zip.file("xl/styles.xml", stylesXml);
+      zip.file("xl/sharedStrings.xml", sharedStringsXml);
+
+      return await zip.generateAsync({
+        type: "blob",
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      });
     }
 
     async function generateSingleWeek() {
@@ -173,10 +195,12 @@
 
       status.textContent = `Fetching NFL Week ${week} (${year}) schedule...`;
       const matchups = await fetchWeekMatchups(year, week);
-      const wb = XLSX.utils.book_new();
-      const ws = buildWorksheet(week, matchups, playerRows);
-      XLSX.utils.book_append_sheet(wb, ws, `Week (${week})`);
-      XLSX.writeFile(wb, `NFL Week ${week}.xlsx`);
+      const blob = await buildExactXlsxBlob(week, matchups, playerRows);
+
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `NFL Week ${week}.xlsx`;
+      a.click();
       status.textContent = `Downloaded NFL Week ${week}.xlsx (${matchups.length} games, MNF: ${matchups[matchups.length-1].away} vs ${matchups[matchups.length-1].home}).`;
     }
 
@@ -184,44 +208,23 @@
       const year = document.getElementById("seasonYear").value;
       const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 6;
       const status = document.getElementById("status");
-      const zip = new JSZip();
+      const masterZip = new JSZip();
 
       for (let w = 1; w <= 18; w++) {
-        status.textContent = `Building Week ${w} of 18...`;
+        status.textContent = `Building exact XML for Week ${w} of 18...`;
         const matchups = await fetchWeekMatchups(year, w);
         if (!matchups.length) continue;
-        const wb = XLSX.utils.book_new();
-        const ws = buildWorksheet(w, matchups, playerRows);
-        XLSX.utils.book_append_sheet(wb, ws, `Week (${w})`);
-        const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-        zip.file(`NFL Week ${w}.xlsx`, wbout);
+        const blob = await buildExactXlsxBlob(w, matchups, playerRows);
+        masterZip.file(`NFL Week ${w}.xlsx`, blob);
       }
 
       status.textContent = "Zipping all 18 files...";
-      const content = await zip.generateAsync({ type: "blob" });
+      const content = await masterZip.generateAsync({ type: "blob" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(content);
       a.download = `NFL_Pickem_${year}_All_18_Weeks.zip`;
       a.click();
       status.textContent = `Done! Downloaded all 18 weekly files for ${year}.`;
-    }
-
-    async function generateFullSeasonWorkbook() {
-      const year = document.getElementById("seasonYear").value;
-      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 6;
-      const status = document.getElementById("status");
-      const wb = XLSX.utils.book_new();
-
-      for (let w = 1; w <= 18; w++) {
-        status.textContent = `Adding Week ${w} of 18 to master workbook...`;
-        const matchups = await fetchWeekMatchups(year, w);
-        if (!matchups.length) continue;
-        const ws = buildWorksheet(w, matchups, playerRows);
-        XLSX.utils.book_append_sheet(wb, ws, `Week (${w})`);
-      }
-
-      XLSX.writeFile(wb, `NFL Season ${year} - All Weeks.xlsx`);
-      status.textContent = `Done! Downloaded single 18-tab workbook for ${year}.`;
     }
   </script>
 </body>
