@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Uncle's NFL Pick'em Sheet Generator</title>
-  <!-- xlsx-js-style supports exact fonts, borders, column widths, and textRotation: 255 -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <style>
@@ -26,8 +26,8 @@
     <label for="seasonYear">NFL Season Year</label>
     <input type="number" id="seasonYear" value="2026" />
 
-    <label for="playerRows">Blank Player Rows to Include</label>
-    <input type="number" id="playerRows" value="25" />
+    <label for="playerRows">Blank Player Rows to Include (Uncle's sheet uses 6)</label>
+    <input type="number" id="playerRows" value="6" />
 
     <label for="singleWeek">Single Week Download</label>
     <select id="singleWeek">
@@ -54,6 +54,11 @@
       right: { style: "thin", color: { rgb: "000000" } }
     };
 
+    const whiteFill = {
+      patternType: "solid",
+      fgColor: { rgb: "FFFFFF" }
+    };
+
     async function fetchWeekMatchups(year, week) {
       const url = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${year}&seasontype=2&week=${week}`;
       const res = await fetch(url);
@@ -73,34 +78,50 @@
 
     function buildWorksheet(week, matchups, playerRowCount) {
       const numGames = matchups.length;
-      const tieBreakerCol = 3 * numGames; // 0-indexed: Col A = 0, games take 3*N - 1 cols, TieBreaker = 3*N
+      const tieBreakerCol = 3 * numGames; // Col A = 0, games take 3*N - 1 cols, TieBreaker = 3*N
       const totalRows = 2 + playerRowCount;
+      const extraBlankRows = totalRows + 25; // Paint white background below table to hide Excel gridlines
       const ws = {};
 
-      // Initialize grid cells with exact styles
-      for (let r = 0; r < totalRows; r++) {
-        for (let c = 0; c <= tieBreakerCol; c++) {
-          const cellRef = XLSX.utils.encode_cell({ r, c });
-          ws[cellRef] = { v: "", t: "s", s: {} };
+      // Hide default sheet gridlines where supported and fill background white
+      ws["!views"] = [{ showGridLines: false }];
 
-          if (r === 0) {
-            ws[cellRef].s = {
-              font: { name: "Arial", sz: 8 },
-              alignment: { textRotation: 255, horizontal: "center", vertical: "bottom" },
-              border: thinBorder
-            };
-          } else if (r === 1) {
-            ws[cellRef].s = {
-              font: { name: "Arial", sz: 10, bold: true },
-              alignment: { horizontal: "center", vertical: "center" },
-              border: thinBorder
-            };
-          } else {
-            ws[cellRef].s = {
-              font: { name: "Arial", sz: 10 },
-              alignment: { horizontal: c === 0 ? "left" : "center", vertical: "center" },
-              border: thinBorder
-            };
+      for (let r = 0; r < extraBlankRows; r++) {
+        for (let c = 0; c <= tieBreakerCol + 2; c++) {
+          const cellRef = XLSX.utils.encode_cell({ r, c });
+          ws[cellRef] = { v: "", t: "s", s: { fill: whiteFill } };
+
+          if (r < totalRows && c <= tieBreakerCol) {
+            if (r === 0) {
+              // Row 1: Vertical stacked team headers
+              ws[cellRef].s = {
+                font: { name: "Arial", sz: 8 },
+                alignment: { textRotation: 255, horizontal: "center", vertical: "bottom" },
+                fill: whiteFill,
+                border: thinBorder
+              };
+            } else if (r === 1) {
+              // Row 2: Merged "NFL Week X" banner (Bold + Underline, top/bottom borders)
+              ws[cellRef].s = {
+                font: { name: "Arial", sz: 10, bold: true, underline: true },
+                alignment: { horizontal: "center", vertical: "center" },
+                fill: whiteFill,
+                border: {
+                  top: { style: "thin", color: { rgb: "000000" } },
+                  bottom: { style: "thin", color: { rgb: "000000" } },
+                  left: c === 0 ? { style: "thin", color: { rgb: "000000" } } : undefined,
+                  right: c === tieBreakerCol ? { style: "thin", color: { rgb: "000000" } } : undefined
+                }
+              };
+            } else {
+              // Rows 3+: Player pick rows
+              ws[cellRef].s = {
+                font: { name: "Arial", sz: 10 },
+                alignment: { horizontal: c === 0 ? "left" : "center", vertical: "center" },
+                fill: whiteFill,
+                border: thinBorder
+              };
+            }
           }
         }
       }
@@ -120,33 +141,34 @@
       ws["A2"].v = `NFL Week ${week}`;
       ws["!merges"] = [{ s: { r: 1, c: 0 }, e: { r: 1, c: tieBreakerCol } }];
 
-      // Column widths matching your uncle's sheet
-      const cols = [{ wch: 29.8 }]; // Col A
+      // Exact pixel widths (`wpx`) so spacer columns collapse to double-lines like Uncle's sheet
+      const cols = [{ wpx: 215 }]; // Col A (~29.8 width)
       for (let i = 0; i < numGames; i++) {
-        cols.push({ wch: 2.83 }); // Away col
-        cols.push({ wch: 2.83 }); // Home col
+        cols.push({ wpx: 25 }); // Away col (~2.83 width)
+        cols.push({ wpx: 25 }); // Home col (~2.83 width)
         if (i < numGames - 1) {
-          cols.push({ wch: 0.27 }); // Micro-spacer column between games
+          cols.push({ wpx: 3 }); // Micro-spacer column (3px double-line divider)
         }
       }
-      cols.push({ wch: 2.96 }); // Tie Breaker col
+      cols.push({ wpx: 26 }); // Tie Breaker col
+      cols.push({ wpx: 65 }); // Extra right margin column
       ws["!cols"] = cols;
 
-      // Row heights (Row 1 = 117pt, others = 12.75pt)
+      // Exact Row heights (Row 1 = 117pt, others = 12.75pt)
       const rows = [{ hpt: 117.0 }];
-      for (let r = 1; r < totalRows; r++) {
+      for (let r = 1; r < extraBlankRows; r++) {
         rows.push({ hpt: 12.75 });
       }
       ws["!rows"] = rows;
 
-      ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: totalRows - 1, c: tieBreakerCol } });
+      ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: extraBlankRows - 1, c: tieBreakerCol + 2 } });
       return ws;
     }
 
     async function generateSingleWeek() {
       const year = document.getElementById("seasonYear").value;
       const week = document.getElementById("singleWeek").value;
-      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 25;
+      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 6;
       const status = document.getElementById("status");
 
       status.textContent = `Fetching NFL Week ${week} (${year}) schedule...`;
@@ -160,7 +182,7 @@
 
     async function generateFullSeasonZip() {
       const year = document.getElementById("seasonYear").value;
-      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 25;
+      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 6;
       const status = document.getElementById("status");
       const zip = new JSZip();
 
@@ -186,7 +208,7 @@
 
     async function generateFullSeasonWorkbook() {
       const year = document.getElementById("seasonYear").value;
-      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 25;
+      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 6;
       const status = document.getElementById("status");
       const wb = XLSX.utils.book_new();
 
