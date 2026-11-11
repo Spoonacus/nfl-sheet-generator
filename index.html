@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Uncle's NFL Pick'em Sheet Generator</title>
+  <!-- xlsx-js-style supports exact fonts, borders, column widths, and textRotation: 255 -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 20px; background: #f4f6f8; color: #1a1a1a; }
+    .card { background: #fff; padding: 24px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    h2 { margin-top: 0; }
+    label { display: block; margin: 12px 0 6px; font-weight: 600; font-size: 14px; }
+    select, input, button { width: 100%; padding: 10px; font-size: 15px; border-radius: 6px; border: 1px solid #ccc; box-sizing: border-box; }
+    button { background: #013369; color: white; border: none; font-weight: 600; cursor: pointer; margin-top: 16px; }
+    button:hover { background: #002244; }
+    button.secondary { background: #d50a0a; margin-top: 10px; }
+    button.secondary:hover { background: #a80808; }
+    #status { margin-top: 16px; font-size: 14px; color: #333; white-space: pre-line; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>NFL Pick'em Excel Generator</h2>
+    
+    <label for="seasonYear">NFL Season Year</label>
+    <input type="number" id="seasonYear" value="2026" />
+
+    <label for="playerRows">Blank Player Rows to Include</label>
+    <input type="number" id="playerRows" value="25" />
+
+    <label for="singleWeek">Single Week Download</label>
+    <select id="singleWeek">
+      <option value="1">Week 1</option><option value="2">Week 2</option><option value="3">Week 3</option>
+      <option value="4">Week 4</option><option value="5">Week 5</option><option value="6">Week 6</option>
+      <option value="7">Week 7</option><option value="8">Week 8</option><option value="9">Week 9</option>
+      <option value="10">Week 10</option><option value="11" selected>Week 11</option><option value="12">Week 12</option>
+      <option value="13">Week 13</option><option value="14">Week 14</option><option value="15">Week 15</option>
+      <option value="16">Week 16</option><option value="17">Week 17</option><option value="18">Week 18</option>
+    </select>
+
+    <button onclick="generateSingleWeek()">Download Selected Week (.xlsx)</button>
+    <button class="secondary" onclick="generateFullSeasonZip()">Download All 18 Weeks (.zip of 18 .xlsx files)</button>
+    <button onclick="generateFullSeasonWorkbook()" style="background:#2e7d32;">Download All 18 Weeks (Single 18-Tab .xlsx)</button>
+
+    <div id="status">Ready.</div>
+  </div>
+
+  <script>
+    const thinBorder = {
+      top: { style: "thin", color: { rgb: "000000" } },
+      bottom: { style: "thin", color: { rgb: "000000" } },
+      left: { style: "thin", color: { rgb: "000000" } },
+      right: { style: "thin", color: { rgb: "000000" } }
+    };
+
+    async function fetchWeekMatchups(year, week) {
+      const url = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${year}&seasontype=2&week=${week}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      const events = data.events || [];
+
+      // Sort chronologically by kickoff date/time so MNF is guaranteed to be last
+      events.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+      return events.map(ev => {
+        const comp = ev.competitions[0];
+        const away = comp.competitors.find(c => c.homeAway === "away").team.shortDisplayName;
+        const home = comp.competitors.find(c => c.homeAway === "home").team.shortDisplayName;
+        return { away, home, date: ev.date };
+      });
+    }
+
+    function buildWorksheet(week, matchups, playerRowCount) {
+      const numGames = matchups.length;
+      const tieBreakerCol = 3 * numGames; // 0-indexed: Col A = 0, games take 3*N - 1 cols, TieBreaker = 3*N
+      const totalRows = 2 + playerRowCount;
+      const ws = {};
+
+      // Initialize grid cells with exact styles
+      for (let r = 0; r < totalRows; r++) {
+        for (let c = 0; c <= tieBreakerCol; c++) {
+          const cellRef = XLSX.utils.encode_cell({ r, c });
+          ws[cellRef] = { v: "", t: "s", s: {} };
+
+          if (r === 0) {
+            ws[cellRef].s = {
+              font: { name: "Arial", sz: 8 },
+              alignment: { textRotation: 255, horizontal: "center", vertical: "bottom" },
+              border: thinBorder
+            };
+          } else if (r === 1) {
+            ws[cellRef].s = {
+              font: { name: "Arial", sz: 10, bold: true },
+              alignment: { horizontal: "center", vertical: "center" },
+              border: thinBorder
+            };
+          } else {
+            ws[cellRef].s = {
+              font: { name: "Arial", sz: 10 },
+              alignment: { horizontal: c === 0 ? "left" : "center", vertical: "center" },
+              border: thinBorder
+            };
+          }
+        }
+      }
+
+      // Populate Row 1: Away, Home, Spacer
+      matchups.forEach((m, idx) => {
+        const awayCol = 1 + idx * 3;
+        const homeCol = 2 + idx * 3;
+        ws[XLSX.utils.encode_cell({ r: 0, c: awayCol })].v = m.away;
+        ws[XLSX.utils.encode_cell({ r: 0, c: homeCol })].v = m.home;
+      });
+
+      // Populate Tie Breaker header
+      ws[XLSX.utils.encode_cell({ r: 0, c: tieBreakerCol })].v = "Tie Breaker";
+
+      // Populate Row 2: Merged "NFL Week X" Banner
+      ws["A2"].v = `NFL Week ${week}`;
+      ws["!merges"] = [{ s: { r: 1, c: 0 }, e: { r: 1, c: tieBreakerCol } }];
+
+      // Column widths matching your uncle's sheet
+      const cols = [{ wch: 29.8 }]; // Col A
+      for (let i = 0; i < numGames; i++) {
+        cols.push({ wch: 2.83 }); // Away col
+        cols.push({ wch: 2.83 }); // Home col
+        if (i < numGames - 1) {
+          cols.push({ wch: 0.27 }); // Micro-spacer column between games
+        }
+      }
+      cols.push({ wch: 2.96 }); // Tie Breaker col
+      ws["!cols"] = cols;
+
+      // Row heights (Row 1 = 117pt, others = 12.75pt)
+      const rows = [{ hpt: 117.0 }];
+      for (let r = 1; r < totalRows; r++) {
+        rows.push({ hpt: 12.75 });
+      }
+      ws["!rows"] = rows;
+
+      ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: totalRows - 1, c: tieBreakerCol } });
+      return ws;
+    }
+
+    async function generateSingleWeek() {
+      const year = document.getElementById("seasonYear").value;
+      const week = document.getElementById("singleWeek").value;
+      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 25;
+      const status = document.getElementById("status");
+
+      status.textContent = `Fetching NFL Week ${week} (${year}) schedule...`;
+      const matchups = await fetchWeekMatchups(year, week);
+      const wb = XLSX.utils.book_new();
+      const ws = buildWorksheet(week, matchups, playerRows);
+      XLSX.utils.book_append_sheet(wb, ws, `Week (${week})`);
+      XLSX.writeFile(wb, `NFL Week ${week}.xlsx`);
+      status.textContent = `Downloaded NFL Week ${week}.xlsx (${matchups.length} games, MNF: ${matchups[matchups.length-1].away} vs ${matchups[matchups.length-1].home}).`;
+    }
+
+    async function generateFullSeasonZip() {
+      const year = document.getElementById("seasonYear").value;
+      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 25;
+      const status = document.getElementById("status");
+      const zip = new JSZip();
+
+      for (let w = 1; w <= 18; w++) {
+        status.textContent = `Building Week ${w} of 18...`;
+        const matchups = await fetchWeekMatchups(year, w);
+        if (!matchups.length) continue;
+        const wb = XLSX.utils.book_new();
+        const ws = buildWorksheet(w, matchups, playerRows);
+        XLSX.utils.book_append_sheet(wb, ws, `Week (${w})`);
+        const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+        zip.file(`NFL Week ${w}.xlsx`, wbout);
+      }
+
+      status.textContent = "Zipping all 18 files...";
+      const content = await zip.generateAsync({ type: "blob" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(content);
+      a.download = `NFL_Pickem_${year}_All_18_Weeks.zip`;
+      a.click();
+      status.textContent = `Done! Downloaded all 18 weekly files for ${year}.`;
+    }
+
+    async function generateFullSeasonWorkbook() {
+      const year = document.getElementById("seasonYear").value;
+      const playerRows = parseInt(document.getElementById("playerRows").value, 10) || 25;
+      const status = document.getElementById("status");
+      const wb = XLSX.utils.book_new();
+
+      for (let w = 1; w <= 18; w++) {
+        status.textContent = `Adding Week ${w} of 18 to master workbook...`;
+        const matchups = await fetchWeekMatchups(year, w);
+        if (!matchups.length) continue;
+        const ws = buildWorksheet(w, matchups, playerRows);
+        XLSX.utils.book_append_sheet(wb, ws, `Week (${w})`);
+      }
+
+      XLSX.writeFile(wb, `NFL Season ${year} - All Weeks.xlsx`);
+      status.textContent = `Done! Downloaded single 18-tab workbook for ${year}.`;
+    }
+  </script>
+</body>
+</html>
